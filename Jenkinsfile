@@ -1,24 +1,16 @@
+
 pipeline {
     agent any
-
     tools {
         jdk 'jdk17'
         maven 'M2_HOME'
-    
-     }
-
-    environment {
-        // URL SonarQube (si Sonar tourne sur la même machine que Jenkins: http://localhost:9000)
-        // Si Jenkins est dans une VM et Sonar dans docker sur la même VM, ça reste localhost.
-        SONAR_HOST_URL = 'http://localhost:9000'
-
-        // Mets ton token Sonar ici si tu veux tester vite (pas idéal)
-        // Mieux: Credentials Jenkins (voir note en dessous)
-       // SONAR_TOKEN = 'squ_e784b8cfd03b5c84f531ca3642af7806cf38b1ad'
     }
-
-      stages {
-
+    environment {
+        SONAR_HOST_URL = 'http://localhost:9000'
+        DOCKER_IMAGE = 'balsembalsem/devopsprojet'
+        DOCKER_TAG = "2.0.${BUILD_NUMBER}"
+    }
+    stages {
         stage('Checkout') {
             steps {
                 git branch: 'main',
@@ -28,13 +20,12 @@ pipeline {
 
         stage('Build') {
             steps {
-                sh 'mvn -B clean compile'
+                sh 'mvn -B clean package -DskipTests'
             }
         }
 
-          stage('SonarQube Analysis') {
+        stage('SonarQube Analysis') {
             steps {
-                // Utilise le credential sonar-token (recommandé)
                 withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                     sh '''
                       mvn -B sonar:sonar \
@@ -46,14 +37,40 @@ pipeline {
                 }
             }
         }
-    }
 
+        stage('Docker Build & Push') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        docker build -t $DOCKER_IMAGE:$DOCKER_TAG .
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                        docker push $DOCKER_IMAGE:$DOCKER_TAG
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    kubectl set image deployment/spring-app \
+                        spring-app=$DOCKER_IMAGE:$DOCKER_TAG \
+                        -n devops
+                    kubectl rollout status deployment/spring-app -n devops
+                '''
+            }
+        }
+    }
     post {
         success {
-            echo 'Build + Sonar analysis SUCCESS'
+            echo 'Pipeline SUCCESS - Application déployée sur Kubernetes !'
         }
         failure {
-            echo 'Build FAILED'
+            echo 'Pipeline FAILED'
         }
     }
-}    
+}
